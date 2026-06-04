@@ -1,0 +1,17 @@
+{
+  "name": "ghost-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ghost AI - Real-time invisible AI desktop assistant",
+  "scripts": {
+    "dev": "concurrently \"pnpm --filter core-engine dev\" \"pnpm --filter desktop dev\"",
+    "dev:core": "pnpm --filter core-engine dev",
+    "dev:desktop": "pnpm --filter desktop dev",
+    "build": "pnpm --filter core-engine build && pnpm --filter desktop build",
+    "install:all": "pnpm install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

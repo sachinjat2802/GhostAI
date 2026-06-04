@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ghost AI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Header Bar -->
+    <div class="header" id="drag-region">
+      <div class="header-left">
+        <div class="ghost-icon">
+          <span class="ghost-emoji">👻</span>
+          <div class="pulse-ring"></div>
+        </div>
+        <div class="title-group">
+          <span class="app-name">Ghost AI</span>
+          <span class="mode-badge" id="mode-badge">Interview</span>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="status-dot" id="status-dot" title="Connection status"></div>
+        <button class="icon-btn" id="btn-settings" title="Settings" onclick="toggleSettingsPanel()">⚙️</button>
+        <button class="icon-btn" id="btn-minimize" title="Hide (Ctrl+Shift+Space)">−</button>
+      </div>
+    </div>
+
+    <!-- Live Transcript Panel -->
+    <div class="panel" id="transcript-panel">
+      <div class="panel-label">
+        <span class="label-icon">🎙️</span>
+        <span>LIVE TRANSCRIPT</span>
+        <div class="audio-bars" id="audio-bars">
+          <div class="bar"></div>
+          <div class="bar"></div>
+          <div class="bar"></div>
+          <div class="bar"></div>
+          <div class="bar"></div>
+        </div>
+      </div>
+      <div class="transcript-content" id="transcript-content">
+        <div class="empty-state" id="transcript-empty">
+          <span class="empty-icon">🎤</span>
+          <p>Press <kbd>Ctrl+Shift+A</kbd> to start listening...</p>
+        </div>
+        <div class="transcript-text" id="transcript-text" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- AI Answer Panel -->
+    <div class="panel suggestion-panel">
+      <div class="panel-label">
+        <span class="label-icon">🧠</span>
+        <span id="ai-panel-label">AI ANSWER</span>
+        <div class="thinking-dots" id="thinking-dots" style="display:none">
+          <span></span><span></span><span></span>
+        </div>
+      </div>
+      <div class="suggestion-content" id="suggestion-content">
+        <div class="empty-state" id="suggestion-empty">
+          <span class="empty-icon">🧠</span>
+          <p>Listening for context...</p>
+        </div>
+        <div class="suggestion-text" id="suggestion-text" style="display:none"></div>
+      </div>
+    </div>
+
+    <!-- Chat Input (Visible in General Mode) -->
+    <div class="chat-input-container" id="chat-input-container" style="display:none">
+      <input type="text" id="chat-input" placeholder="Ask a question..." onkeydown="if(event.key==='Enter') sendChat()" />
+      <button class="chat-send-btn" onclick="sendChat()">⏎</button>
+    </div>
+
+    <!-- Control Bar -->
+    <div class="controls">
+      <button class="control-btn" id="btn-listen" onclick="toggleListening()">
+        <span class="btn-icon">🎤</span>
+        <span id="btn-listen-label">Start</span>
+      </button>
+      
+      <!-- Coding Mode Only: Screenshot -->
+      <button class="control-btn" id="btn-capture" onclick="captureScreen()" style="display:none" title="Capture & Solve">
+        <span class="btn-icon">📸</span>
+        <span>Solve</span>
+      </button>
+
+      <button class="control-btn" id="btn-clear" onclick="clearContext()">
+        <span class="btn-icon">🗑️</span>
+        <span>Clear</span>
+      </button>
+      
+      <div class="mode-selector custom-select" id="custom-select" onclick="toggleDropdown()">
+        <div class="select-selected" id="select-selected">💼 Interview</div>
+        <div class="select-items select-hide" id="select-items">
+          <div onclick="selectMode(event, 'interview', '💼 Interview')">💼 Interview</div>
+          <div onclick="selectMode(event, 'meeting', '🤝 Meeting')">🤝 Meeting</div>
+          <div onclick="selectMode(event, 'coding', '💻 Coding')">💻 Coding</div>
+          <div onclick="selectMode(event, 'general', '🌐 General')">🌐 General</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shortcut hints -->
+    <div class="shortcuts-bar">
+      <span><kbd>⌃⇧A</kbd> Listen</span>
+      <span><kbd>⌃⇧C</kbd> Clear</span>
+      <span><kbd>⌃⇧M</kbd> Mode</span>
+      <span><kbd>⌃⇧Space</kbd> Hide</span>
+    </div>
+
+    <!-- Settings Panel (Sliding overlay) -->
+    <div class="settings-panel" id="settings-panel">
+      <div class="settings-header">
+        <span>⚙️ Settings</span>
+        <button class="icon-btn" onclick="toggleSettingsPanel()" style="font-size: 20px;">×</button>
+      </div>
+      <div class="settings-content">
+        <div class="setting-group">
+          <label for="setting-gemini-key">Gemini API Key</label>
+          <input type="password" id="setting-gemini-key" placeholder="Enter Gemini API Key..." />
+        </div>
+        
+        <div class="setting-group">
+          <label for="setting-resume">Candidate Resume / Profile</label>
+          <textarea id="setting-resume" placeholder="Paste your resume text here to customize suggestions..."></textarea>
+        </div>
+        
+        <div class="setting-group">
+          <label for="setting-audio-source">Audio Input Source</label>
+          <select id="setting-audio-source" onchange="changeAudioSource(this.value)">
+            <option value="mic">🎤 Microphone (HTML5)</option>
+            <option value="system">🖥️ System Audio (Desktop)</option>
+            <option value="mock">🤖 Mock Transcripts</option>
+          </select>
+        </div>
+
+        <div class="setting-group" id="setting-group-vad">
+          <label for="setting-vad-sensitivity">VAD Sensitivity (Mic Gate)</label>
+          <div style="display: flex; align-items: center; gap: 8px;">
+            <input type="range" id="setting-vad-sensitivity" min="0.005" max="0.05" step="0.005" value="0.015" oninput="updateVadLabel(this.value)" style="flex: 1;" />
+            <span id="vad-sensitivity-label" style="font-size: 10px; width: 30px; text-align: right; color: var(--text-secondary);">0.015</span>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-group" style="flex: 1;">
+            <label for="setting-opacity">Overlay Opacity</label>
+            <input type="range" id="setting-opacity" min="0.2" max="1.0" step="0.05" value="0.92" oninput="updateOpacity(this.value)" />
+          </div>
+          <div class="setting-group" style="flex: 1;">
+            <label for="setting-font-size">Font Size</label>
+            <input type="range" id="setting-font-size" min="10" max="18" step="1" value="13" oninput="updateFontSize(this.value)" />
+          </div>
+        </div>
+
+        <div class="setting-checkbox">
+          <input type="checkbox" id="setting-always-on-top" checked onchange="toggleAlwaysOnTop(this.checked)" />
+          <label for="setting-always-on-top">Always on Top</label>
+        </div>
+
+        <div class="setting-checkbox">
+          <input type="checkbox" id="setting-auto-hide" onchange="toggleAutoHide(this.checked)" />
+          <label for="setting-auto-hide">Auto-Hide during screen share</label>
+        </div>
+        
+        <button class="settings-save-btn" onclick="saveSettings()">Save & Apply</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Screen Share Warning Overlay -->
+  <div class="screenshare-warning" id="screenshare-warning" style="display:none">
+    <div class="warning-content">
+      <span>🖥️</span>
+      <p>Screen share detected</p>
+      <p class="warning-sub">Hiding automatically</p>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
