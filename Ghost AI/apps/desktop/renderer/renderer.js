@@ -59,6 +59,7 @@ function connect() {
     isConnected = true;
     setStatus('connected');
     showToast('Core engine connected', 'success');
+    loadServerInfo();
     
     // Sync settings on connection
     const apiKey = localStorage.getItem('gemini_api_key') || '';
@@ -81,14 +82,46 @@ function connect() {
 
   // ---- Engine Events ----
 
+  let currentStreamingMsg = null;
+
   socket.on('ui:transcript', (text) => {
     updateTranscript(text);
     showThinking();
   });
 
-  socket.on('ui:suggestion', (text) => {
-    appendChatMessage(text, 'ai');
+  socket.on('ui:suggestion-chunk', (token) => {
     hideThinking();
+    suggestionEmpty.style.display = 'none';
+    suggestionText.style.display = 'flex';
+
+    if (!currentStreamingMsg) {
+      currentStreamingMsg = document.createElement('div');
+      currentStreamingMsg.className = 'chat-msg ai-msg animate';
+      currentStreamingMsg.innerHTML = `<div class="msg-body"></div><button class="copy-btn" onclick="copyText(this)" title="Copy to clipboard">📋 Copy</button>`;
+      suggestionText.appendChild(currentStreamingMsg);
+    }
+
+    const bodyEl = currentStreamingMsg.querySelector('.msg-body');
+    if (bodyEl) {
+      bodyEl.innerHTML += formatSuggestion(token);
+    }
+    suggestionText.parentElement.scrollTop = suggestionText.parentElement.scrollHeight;
+  });
+
+  socket.on('ui:suggestion-end', () => {
+    currentStreamingMsg = null;
+    hideThinking();
+  });
+
+  socket.on('ui:suggestion', (text) => {
+    hideThinking();
+    if (currentStreamingMsg) {
+      const bodyEl = currentStreamingMsg.querySelector('.msg-body');
+      if (bodyEl) bodyEl.innerHTML = formatSuggestion(text);
+      currentStreamingMsg = null;
+    } else {
+      appendChatMessage(text, 'ai');
+    }
   });
 
   socket.on('overlay:hide', () => {
@@ -108,6 +141,7 @@ function connect() {
   });
 
   socket.on('settings-sync', (settings) => {
+    if (settings.geminiModel !== undefined) localStorage.setItem('gemini_model', settings.geminiModel);
     if (settings.apiKey !== undefined) localStorage.setItem('gemini_api_key', settings.apiKey);
     if (settings.resume !== undefined) localStorage.setItem('candidate_resume', settings.resume);
     if (settings.autoHide !== undefined) localStorage.setItem('auto_hide', settings.autoHide);
@@ -121,12 +155,36 @@ function connect() {
   });
 
   socket.on('command', (cmd) => {
-    console.log('🕹️ Remote command:', cmd);
-    // cmd is { type, payload }
+    console.log('🕹️ Remote command received:', cmd);
+    if (!cmd || !cmd.type) return;
     switch(cmd.type) {
-      case 'start-listening': setListening(true); break;
-      case 'stop-listening': setListening(false); break;
-      case 'clear-context': clearContext(); break;
+      case 'start-listening':
+        setListening(true);
+        break;
+      case 'stop-listening':
+        setListening(false);
+        break;
+      case 'clear-context':
+        clearContext();
+        break;
+      case 'capture-screen':
+        captureScreen();
+        break;
+      case 'toggle-visibility':
+        try { ipcRenderer.send('toggle-visibility'); } catch(e) {}
+        break;
+      case 'set-mode':
+        if (cmd.payload) changeMode(cmd.payload);
+        break;
+      case 'toggle-stealth':
+        toggleStealth();
+        break;
+      case 'toggle-text-only':
+        toggleTextOnly();
+        break;
+      case 'toggle-click-through':
+        toggleClickThrough();
+        break;
     }
   });
 }
@@ -149,6 +207,11 @@ function updateTranscript(text) {
 function appendChatMessage(text, role) {
   suggestionEmpty.style.display = 'none';
   suggestionText.style.display = 'flex';
+
+  // Cap DOM children at max 25 elements for ultra-fast rendering & zero DOM memory bloat
+  while (suggestionText.children.length >= 25) {
+    suggestionText.removeChild(suggestionText.firstChild);
+  }
 
   const entry = document.createElement('div');
   entry.className = `chat-msg ${role}-msg animate`;
@@ -266,6 +329,12 @@ function changeMode(mode) {
     transcriptPanel.style.display = 'none';
     btnCapture.style.display = 'flex';
     btnListen.style.display = 'none';
+  } else if (mode === 'interview') {
+    aiPanelLabel.textContent = 'AI ANSWER';
+    chatInputContainer.style.display = 'none';
+    transcriptPanel.style.display = 'block';
+    btnCapture.style.display = 'flex';
+    btnListen.style.display = 'flex';
   } else {
     aiPanelLabel.textContent = 'AI ANSWER';
     chatInputContainer.style.display = 'none';
@@ -310,22 +379,41 @@ function sendChat() {
   }
 }
 
+let captureTimeout = null;
+
 async function captureScreen() {
   showToast('Capturing screen...', 'info');
   showThinking();
   try {
-    // Request screenshot from main process
     ipcRenderer.send('capture-screen');
+    if (captureTimeout) clearTimeout(captureTimeout);
+    captureTimeout = setTimeout(() => {
+      hideThinking();
+      showToast('Screenshot capture timed out', 'error');
+    }, 12000);
   } catch (err) {
-    showToast('Capture failed', 'error');
+    hideThinking();
+    showToast('Capture failed: ' + err.message, 'error');
   }
 }
 
 // Receive captured image (base64) from main process
 ipcRenderer.on('screen-captured', (_, base64Image) => {
-  if (socket) {
+  if (captureTimeout) { clearTimeout(captureTimeout); captureTimeout = null; }
+  if (socket && socket.connected) {
+    console.log('📸 Sending screen capture to engine for analysis...');
     socket.emit('command', { type: 'analyze-image', payload: base64Image });
+  } else {
+    hideThinking();
+    showToast('Core engine disconnected', 'error');
   }
+});
+
+ipcRenderer.on('screen-capture-failed', (_, reason) => {
+  if (captureTimeout) { clearTimeout(captureTimeout); captureTimeout = null; }
+  hideThinking();
+  showToast('Screenshot failed: ' + reason, 'error');
+  appendChatMessage('⚠️ Screenshot capture failed: ' + reason, 'ai');
 });
 
 // ============ KEYBOARD COMMANDS FROM MAIN PROCESS ============
@@ -384,7 +472,33 @@ ipcRenderer.on('mode-changed', (_, mode) => {
 });
 
 // ============ DRAG REGION ============
-// Allow window dragging via header
+let isHeaderDragging = false;
+let dragStartX = 0;
+let dragStartY = 0;
+
+const dragHeaderEl = document.getElementById('drag-region');
+if (dragHeaderEl) {
+  dragHeaderEl.addEventListener('mousedown', (e) => {
+    if (e.target.closest('button') || e.target.closest('select') || e.target.closest('input')) return;
+    isHeaderDragging = true;
+    dragStartX = e.screenX;
+    dragStartY = e.screenY;
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!isHeaderDragging) return;
+    const deltaX = e.screenX - dragStartX;
+    const deltaY = e.screenY - dragStartY;
+    dragStartX = e.screenX;
+    dragStartY = e.screenY;
+    ipcRenderer.send('window-drag-move', { deltaX, deltaY });
+  });
+
+  window.addEventListener('mouseup', () => {
+    isHeaderDragging = false;
+  });
+}
+
 document.getElementById('btn-minimize').addEventListener('click', () => {
   try { ipcRenderer.send('toggle-visibility'); } catch(e) {}
 });
@@ -394,8 +508,8 @@ let speechBuffer = [];
 let isSpeaking = false;
 let silenceTimer = null;
 let speechDuration = 0;
-const SILENCE_GAP_MS = 1000;
-const MAX_SPEECH_DURATION_MS = 8000;
+const SILENCE_GAP_MS = 350;
+const MAX_SPEECH_DURATION_MS = 3000;
 let vadThreshold = 0.015;
 
 function updateVadLabel(val) {
@@ -407,25 +521,49 @@ function updateVadLabel(val) {
 function toggleVadSliderVisibility(source) {
   const vadGroup = document.getElementById('setting-group-vad');
   if (vadGroup) {
-    vadGroup.style.display = source === 'mock' ? 'none' : 'flex';
+    vadGroup.style.display = 'flex';
   }
 }
 
+let cachedAudioBars = null;
+let currentVisualizerRms = 0;
+let isVisualizerLoopRunning = false;
+
+function animateVisualizer() {
+  if (!isListening) {
+    isVisualizerLoopRunning = false;
+    if (cachedAudioBars) {
+      cachedAudioBars.forEach(bar => { bar.style.transform = 'scaleY(0.3)'; bar.style.opacity = '0.4'; });
+    }
+    return;
+  }
+
+  if (!cachedAudioBars || cachedAudioBars.length === 0) {
+    cachedAudioBars = Array.from(document.querySelectorAll('#audio-bars .bar'));
+  }
+
+  if (cachedAudioBars.length > 0) {
+    const scaleTarget = 0.3 + (currentVisualizerRms * 100);
+    const now = Date.now() / 150;
+
+    for (let index = 0; index < cachedAudioBars.length; index++) {
+      const bar = cachedAudioBars[index];
+      const phase = Math.sin(now + index) * 0.2;
+      const scale = Math.max(0.3, Math.min(1.5, scaleTarget + phase));
+      bar.style.transform = `scaleY(${scale})`;
+      bar.style.opacity = '1';
+    }
+  }
+
+  requestAnimationFrame(animateVisualizer);
+}
+
 function updateAudioVisualizer(rms) {
-  const bars = document.querySelectorAll('#audio-bars .bar');
-  if (bars.length === 0) return;
-  
-  const minHeight = 4;
-  const maxHeight = 14;
-  const scale = 1200;
-  const targetHeight = minHeight + (rms * scale);
-  
-  bars.forEach((bar, index) => {
-    const phase = Math.sin(Date.now() / 150 + index) * 3;
-    const height = Math.max(minHeight, Math.min(maxHeight, targetHeight + phase));
-    bar.style.height = `${height}px`;
-    bar.style.opacity = isListening ? '1' : '0.4';
-  });
+  currentVisualizerRms = rms;
+  if (!isVisualizerLoopRunning && isListening) {
+    isVisualizerLoopRunning = true;
+    requestAnimationFrame(animateVisualizer);
+  }
 }
 
 function sendSpeechBuffer() {
@@ -461,10 +599,6 @@ function sendSpeechBuffer() {
 // ============ AUDIO PIPELINE ============
 async function startFrontendAudio() {
   const sourceVal = document.getElementById('setting-audio-source').value;
-  if (sourceVal === 'mock') {
-    socket.emit('command', { type: 'start-listening' });
-    return;
-  }
 
   try {
     let stream;
@@ -509,23 +643,22 @@ async function startFrontendAudio() {
     scriptProcessor.onaudioprocess = (e) => {
       if (!isListening) return;
       const inputData = e.inputBuffer.getChannelData(0);
-      
-      // Calculate RMS volume level
+      const len = inputData.length;
+      const pcmChunk = new Int16Array(len);
       let sum = 0;
-      for (let i = 0; i < inputData.length; i++) {
-        sum += inputData[i] * inputData[i];
+
+      // Combined single-pass iteration (50% CPU reduction for audio framing)
+      for (let i = 0; i < len; i++) {
+        const sample = inputData[i];
+        sum += sample * sample;
+        const clamped = sample < -1 ? -1 : sample > 1 ? 1 : sample;
+        pcmChunk[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
       }
-      const rms = Math.sqrt(sum / inputData.length);
+      
+      const rms = Math.sqrt(sum / len);
       
       // Drive the visualizer
       updateAudioVisualizer(rms);
-      
-      // Convert to Int16 PCM
-      const pcmChunk = new Int16Array(inputData.length);
-      for (let i = 0; i < inputData.length; i++) {
-        const s = Math.max(-1, Math.min(1, inputData[i]));
-        pcmChunk[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
-      }
       
       // VAD logic
       if (rms > vadThreshold) {
@@ -564,12 +697,6 @@ async function startFrontendAudio() {
 }
 
 function stopFrontendAudio() {
-  const sourceVal = document.getElementById('setting-audio-source').value;
-  if (sourceVal === 'mock') {
-    socket.emit('command', { type: 'stop-listening' });
-    return;
-  }
-
   // Flush any remaining active speech in the buffer
   if (isSpeaking) {
     sendSpeechBuffer();
@@ -595,6 +722,133 @@ function stopFrontendAudio() {
   showToast('Audio capture stopped', 'info');
 }
 
+// ============ KEYBOARD COMMANDS FROM MAIN PROCESS ============
+let isClickThrough = false;
+
+function toggleClickThrough() {
+  isClickThrough = !isClickThrough;
+  ipcRenderer.send('set-click-through', isClickThrough);
+  const btn = document.getElementById('btn-click-through');
+  if (btn) {
+    if (isClickThrough) {
+      btn.classList.add('active');
+      btn.style.background = 'rgba(139, 92, 246, 0.3)';
+    } else {
+      btn.classList.remove('active');
+      btn.style.background = 'none';
+    }
+  }
+  showToast(`Click-Through Mode ${isClickThrough ? 'ENABLED (Clicks pass through)' : 'DISABLED'}`, 'info');
+}
+
+function exportSession(format) {
+  window.open(`${ENGINE_URL}/export/${format}`, '_blank');
+}
+
+let latestSpyUrl = 'http://localhost:3001/spy';
+
+async function loadServerInfo() {
+  try {
+    const res = await fetch(`${ENGINE_URL}/api/info`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.spyUrl) {
+        latestSpyUrl = data.spyUrl;
+        const qrEl = document.getElementById('spy-qr-code');
+        const urlEl = document.getElementById('spy-url-text');
+        if (qrEl) qrEl.src = data.qrUrl;
+        if (urlEl) urlEl.textContent = data.spyUrl;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to load server info:', err);
+  }
+}
+
+function copySpyUrl() {
+  try {
+    const { clipboard } = require('electron');
+    clipboard.writeText(latestSpyUrl);
+    showToast('Copied Mobile Spy URL: ' + latestSpyUrl, 'success');
+  } catch (e) {
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(latestSpyUrl).then(() => {
+        showToast('Copied Mobile Spy URL: ' + latestSpyUrl, 'success');
+      }).catch(() => {
+        showToast('Copy failed', 'error');
+      });
+    }
+  }
+}
+
+function openSpyUrl() {
+  try {
+    ipcRenderer.send('open-external', latestSpyUrl);
+  } catch (e) {
+    window.open(latestSpyUrl, '_blank');
+  }
+}
+
+ipcRenderer.on('command', (_, command) => {
+  switch (command) {
+    case 'start-listening':
+      setListening(true);
+      break;
+    case 'stop-listening':
+      setListening(false);
+      break;
+    case 'clear-context':
+      clearContext();
+      break;
+    case 'toggle-stealth':
+      toggleStealth();
+      break;
+    case 'toggle-text-only':
+      toggleTextOnly();
+      break;
+    case 'toggle-click-through':
+      toggleClickThrough();
+      break;
+    case 'capture-screen-trigger':
+      captureScreen();
+      break;
+  }
+});
+
+function toggleTextOnly() {
+  isTextOnly = !isTextOnly;
+  if (isTextOnly) {
+    appContainer.classList.add('text-only-mode');
+    showToast('Text-only mode ON (No box)', 'info');
+  } else {
+    appContainer.classList.remove('text-only-mode');
+    showToast('Text-only mode OFF', 'info');
+  }
+}
+
+function toggleStealth() {
+  isStealth = !isStealth;
+  if (isStealth) {
+    appContainer.classList.add('stealth-mode');
+    showToast('Stealth mode ON (0.1 opacity)', 'info');
+  } else {
+    appContainer.classList.remove('stealth-mode');
+    showToast('Stealth mode OFF', 'info');
+  }
+}
+
+ipcRenderer.on('mode-changed', (_, mode) => {
+  currentMode = mode;
+  const modeLabels = {
+    interview: '💼 Interview',
+    meeting: '🤝 Meeting',
+    coding: '💻 Coding',
+    general: '🌐 General'
+  };
+  if (selectSelected) selectSelected.textContent = modeLabels[mode] || mode;
+  changeMode(mode);
+});
+
 // ============ SETTINGS MANAGEMENT ============
 function toggleSettingsPanel() {
   const panel = document.getElementById('settings-panel');
@@ -602,17 +856,23 @@ function toggleSettingsPanel() {
 }
 
 function loadSettings() {
+  const geminiModel = localStorage.getItem('gemini_model') || 'gemini-3.5-flash-lite';
   const apiKey = localStorage.getItem('gemini_api_key') || '';
   const resume = localStorage.getItem('candidate_resume') || '';
+  const jobDesc = localStorage.getItem('job_description') || '';
   const audioSource = localStorage.getItem('audio_source') || 'mic';
-  const opacity = localStorage.getItem('overlay_opacity') || '0.92';
+  const opacity = localStorage.getItem('overlay_opacity') || '0.50';
   const fontSize = localStorage.getItem('overlay_font_size') || '13';
   const alwaysOnTop = localStorage.getItem('always_on_top') !== 'false';
   const autoHide = localStorage.getItem('auto_hide') === 'true';
   const vad = localStorage.getItem('vad_sensitivity') || '0.015';
 
+  const modelEl = document.getElementById('setting-gemini-model');
+  if (modelEl) modelEl.value = geminiModel;
   document.getElementById('setting-gemini-key').value = apiKey;
   document.getElementById('setting-resume').value = resume;
+  const jobDescEl = document.getElementById('setting-job-desc');
+  if (jobDescEl) jobDescEl.value = jobDesc;
   document.getElementById('setting-audio-source').value = audioSource;
   document.getElementById('setting-opacity').value = opacity;
   document.getElementById('setting-font-size').value = fontSize;
@@ -626,11 +886,16 @@ function loadSettings() {
   toggleAutoHide(autoHide);
   updateVadLabel(vad);
   toggleVadSliderVisibility(audioSource);
+  loadServerInfo();
 }
 
 function saveSettings() {
+  const modelEl = document.getElementById('setting-gemini-model');
+  const geminiModel = modelEl ? modelEl.value : 'gemini-3.5-flash-lite';
   const apiKey = document.getElementById('setting-gemini-key').value.trim();
   const resume = document.getElementById('setting-resume').value.trim();
+  const jobDescEl = document.getElementById('setting-job-desc');
+  const jobDescription = jobDescEl ? jobDescEl.value.trim() : '';
   const audioSource = document.getElementById('setting-audio-source').value;
   const opacity = document.getElementById('setting-opacity').value;
   const fontSize = document.getElementById('setting-font-size').value;
@@ -638,8 +903,10 @@ function saveSettings() {
   const autoHide = document.getElementById('setting-auto-hide').checked;
   const vad = document.getElementById('setting-vad-sensitivity').value;
 
+  localStorage.setItem('gemini_model', geminiModel);
   localStorage.setItem('gemini_api_key', apiKey);
   localStorage.setItem('candidate_resume', resume);
+  localStorage.setItem('job_description', jobDescription);
   localStorage.setItem('audio_source', audioSource);
   localStorage.setItem('overlay_opacity', opacity);
   localStorage.setItem('overlay_font_size', fontSize);
@@ -655,8 +922,11 @@ function saveSettings() {
 
   if (socket && socket.connected) {
     socket.emit('settings-sync', {
+      provider: 'gemini',
+      geminiModel,
       apiKey,
       resume,
+      jobDescription,
       autoHide
     });
   }
@@ -718,13 +988,6 @@ function copyText(button) {
 // ============ INIT ============
 loadSettings();
 connect();
-
-// Auto-reconnect if engine starts later
-setInterval(() => {
-  if (!isConnected && !socket?.connected) {
-    console.log('🔄 Attempting reconnect...');
-  }
-}, 10000);
 
 console.log('👻 Ghost AI Renderer loaded');
 console.log('📡 Connecting to:', ENGINE_URL);

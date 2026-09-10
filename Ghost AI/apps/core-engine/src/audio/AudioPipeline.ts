@@ -9,15 +9,14 @@ const logger = new Logger('AudioPipeline');
 
 /**
  * AudioPipeline
- * - Captures microphone in real-time using SoX (if available) or node-mic
- * - Falls back to a mock/file-based input for development
+ * - Captures real microphone audio using SoX or WebAudio HTML5 capture
  * - Emits 'chunk' events with raw PCM buffers
  */
 export class AudioPipeline extends EventEmitter {
   private recording = false;
   private soxProcess: ChildProcess | null = null;
   private chunkBuffer: Buffer[] = [];
-  private chunkIntervalMs = parseInt(process.env.AUDIO_CHUNK_MS || '1500');
+  private chunkIntervalMs = parseInt(process.env.AUDIO_CHUNK_MS || '450');
   private sampleRate = parseInt(process.env.AUDIO_SAMPLE_RATE || '16000');
   private chunkTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -44,11 +43,9 @@ export class AudioPipeline extends EventEmitter {
 
   private startCapture() {
     try {
-      // Try using SoX (rec command) for audio capture
       this.startWithSox();
     } catch (e) {
-      logger.warn('⚠️ SoX not found, falling back to mock audio mode');
-      this.startMockMode();
+      logger.info('ℹ️ SoX process unavailable — relying on real WebAudio capture from overlay UI.');
     }
   }
 
@@ -78,50 +75,31 @@ export class AudioPipeline extends EventEmitter {
       throw new Error('SoX failed to start');
     }
 
-    let accBuffer = Buffer.alloc(0);
+    let bufferList: Buffer[] = [];
+    let bufferTotalLen = 0;
 
     this.soxProcess.stdout.on('data', (data: Buffer) => {
-      accBuffer = Buffer.concat([accBuffer, data]);
+      bufferList.push(data);
+      bufferTotalLen += data.length;
     });
 
     this.soxProcess.on('error', (err) => {
-      logger.warn(`SoX error: ${err.message} — switching to mock mode`);
+      logger.info(`SoX stream info: ${err.message} — using real WebAudio capture`);
       if (this.soxProcess) {
         try { this.soxProcess.kill(); } catch {}
         this.soxProcess = null;
       }
-      this.startMockMode();
     });
 
     // Emit chunks at intervals
     this.chunkTimer = setInterval(() => {
-      if (accBuffer.length > 0 && this.recording) {
-        const chunk = accBuffer;
-        accBuffer = Buffer.alloc(0);
+      if (bufferTotalLen > 0 && this.recording) {
+        const chunk = Buffer.concat(bufferList, bufferTotalLen);
+        bufferList = [];
+        bufferTotalLen = 0;
         logger.debug(`📦 Audio chunk: ${chunk.length} bytes`);
         this.emit('chunk', chunk);
       }
-    }, this.chunkIntervalMs);
-  }
-
-  /**
-   * Mock mode: used when no real mic is available (dev/testing)
-   * Simply emits silence buffers so the rest of the pipeline works
-   */
-  private startMockMode() {
-    logger.warn('🔕 MOCK AUDIO MODE — no real audio captured');
-    logger.warn('   Install SoX (https://sox.sourceforge.net) for real audio');
-
-    if (this.chunkTimer) {
-      clearInterval(this.chunkTimer);
-      this.chunkTimer = null;
-    }
-
-    this.chunkTimer = setInterval(() => {
-      if (!this.recording) return;
-      // Emit 1 second of silence (16000 samples * 2 bytes = 32000 bytes)
-      const silence = Buffer.alloc(this.sampleRate * 2);
-      this.emit('chunk', silence);
     }, this.chunkIntervalMs);
   }
 

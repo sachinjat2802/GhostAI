@@ -25,128 +25,187 @@ If an image is provided, analyze the code or error on screen and explain how to 
 Answer questions directly and accurately. Be concise.`,
 };
 
+export type LLMProvider = 'gemini';
+
 export class LLMService {
   private genAI: GoogleGenerativeAI | null = null;
+  private provider: LLMProvider = 'gemini';
+  private apiKey: string = '';
   private modelName: string;
-  private isMock = false;
   private lastCallTime = 0;
-  private minCallInterval = 1000; // lower for more responsiveness
+  private minCallInterval = 150;
 
   constructor() {
-    this.modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    this.modelName = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
+    this.apiKey = process.env.GEMINI_API_KEY || '';
 
-    if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'your_gemini_api_key_here') {
-      logger.warn('⚠️ GEMINI_API_KEY not set — LLM in MOCK mode');
-      this.isMock = true;
+    if (this.apiKey) {
+      this.genAI = new GoogleGenerativeAI(this.apiKey);
+      logger.info(`🧠 LLM: Google Gemini ${this.modelName} initialized`);
     } else {
-      this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-      logger.info(`🧠 LLM: Gemini ${this.modelName}`);
+      logger.warn('⚠️ GEMINI_API_KEY not set — please set GEMINI_API_KEY in .env or Settings');
     }
   }
 
-  updateApiKey(key: string) {
-    if (!key) return;
-    this.isMock = false;
-    this.genAI = new GoogleGenerativeAI(key);
-    logger.info(`🧠 LLM: Gemini key updated, model: ${this.modelName}`);
+  setProvider(_provider: LLMProvider) {
+    this.provider = 'gemini';
+    logger.info(`🧠 LLM Provider locked to: gemini`);
   }
 
-  async getSuggestion(context: string, mode: AssistantMode, resume?: string): Promise<string | null> {
-    if (this.isMock) return this.mockSuggestion(context, mode);
+  getProvider(): LLMProvider {
+    return 'gemini';
+  }
 
+  setModelName(modelName: string) {
+    if (!modelName) return;
+    this.modelName = modelName;
+    logger.info(`🧠 LLM model updated to: ${modelName}`);
+  }
+
+  updateApiKey(key: string, modelName?: string) {
+    if (modelName) this.modelName = modelName;
+    if (!key) return;
+    this.apiKey = key;
+    this.genAI = new GoogleGenerativeAI(key);
+    logger.info(`🧠 LLM: Gemini API key updated, model: ${this.modelName}`);
+  }
+
+  async getSuggestion(
+    context: string,
+    mode: AssistantMode,
+    resume?: string,
+    jobDescription?: string,
+    onToken?: (token: string) => void,
+    force = false
+  ): Promise<string | null> {
     const now = Date.now();
-    if (now - this.lastCallTime < this.minCallInterval) return null;
+    if (!force && now - this.lastCallTime < this.minCallInterval) return null;
     this.lastCallTime = now;
 
+    if (!this.genAI) {
+      const key = this.apiKey || process.env.GEMINI_API_KEY || '';
+      if (key) {
+        this.apiKey = key;
+        this.genAI = new GoogleGenerativeAI(key);
+        logger.info(`🧠 LLM: Gemini lazy-initialized with process key`);
+      } else {
+        logger.error('⚠️ GEMINI_API_KEY missing');
+        const errMsg = '⚠️ Gemini API Key not set. Please set GEMINI_API_KEY in .env or Settings (⚙️).';
+        if (onToken) onToken(errMsg);
+        return errMsg;
+      }
+    }
+
     try {
-      return await this.callGemini(context, mode, resume);
+      return await this.callGeminiStream(context, mode, resume, jobDescription, onToken);
     } catch (err: any) {
-      logger.error('Gemini error', err);
-      return null;
+      logger.error(`LLM Call Error [gemini]:`, err);
+      const errMsg = `⚠️ Gemini API Error: ${err.message || 'Request failed'}`;
+      if (onToken) onToken(errMsg);
+      return errMsg;
     }
   }
 
   async analyzeImage(base64Data: string, mode: AssistantMode): Promise<string | null> {
-    if (this.isMock) return "Mock analysis: I see some code on your screen.";
+    if (!this.genAI) {
+      const key = this.apiKey || process.env.GEMINI_API_KEY || '';
+      if (key) {
+        this.apiKey = key;
+        this.genAI = new GoogleGenerativeAI(key);
+      } else {
+        return "⚠️ Vision Analysis unavailable — please set API key in settings.";
+      }
+    }
 
     try {
-      // Extract data after "base64," if present
       const base64 = base64Data.split(',')[1] || base64Data;
-      
-      const model = this.genAI!.getGenerativeModel({ 
+      const model = this.genAI.getGenerativeModel({
         model: this.modelName,
-        systemInstruction: MODE_PROMPTS[mode]
+        systemInstruction: MODE_PROMPTS[mode],
       });
 
       const result = await model.generateContent([
         {
           inlineData: {
             mimeType: 'image/png',
-            data: base64
-          }
+            data: base64,
+          },
         },
-        { text: "Analyze the question or code on the screen and provide the direct solution." }
+        {
+          text: 'Analyze the question, code snippet, or diagram on screen. Provide the exact solution, code fix, and Time/Space complexity in clean bullet points.',
+        },
       ]);
 
       return result.response.text().trim();
     } catch (err: any) {
       logger.error('Image analysis error', err);
-      return "Analysis failed.";
+      return `⚠️ Analysis failed: ${err.message || 'Check API Key configuration.'}`;
     }
   }
 
-  private async callGemini(context: string, mode: AssistantMode, resume?: string): Promise<string> {
+  private buildSystemInstruction(mode: AssistantMode, resume?: string, jobDescription?: string): string {
     let systemInstruction = MODE_PROMPTS[mode];
-    if (mode === 'interview' && resume && resume.trim()) {
-      systemInstruction += `\n\nCandidate's resume/profile to personalize response:\n"""\n${resume}\n"""\nUse the candidate's experience and skills in the resume to tailor the answer. If the resume doesn't cover the specific question topic, fall back to standard best practice answers in first-person without mentioning the lack of info.`;
+
+    if (mode === 'interview') {
+      if (resume && resume.trim()) {
+        systemInstruction += `\n\nCandidate Resume Context:\n"""\n${resume}\n"""\nAnswer using the candidate's actual experience in first-person voice ("I...").`;
+      }
+      if (jobDescription && jobDescription.trim()) {
+        systemInstruction += `\n\nTarget Job Description:\n"""\n${jobDescription}\n"""\nAlign key terminology and technical points with this job description.`;
+      }
     }
 
-    const model = this.genAI!.getGenerativeModel({
-      model: this.modelName,
-      systemInstruction: systemInstruction,
-    });
+    return systemInstruction;
+  }
 
-    const prompt = `Recent context:\n"${context}"\n\nProvide the response.`;
+  async prewarm() {
+    if (!this.genAI) return;
+    try {
+      const model = this.genAI.getGenerativeModel({ model: this.modelName });
+      model.generateContent('hi').catch(() => {});
+      logger.info('⚡ Gemini LLM connection pre-warmed for ultra-low latency response');
+    } catch {}
+  }
 
-    const result = await model.generateContent({
+  private modelCache = new Map<string, any>();
+
+  private getCachedModel(modelName: string, systemInstruction?: string) {
+    const key = `${modelName}:${systemInstruction || ''}`;
+    if (!this.modelCache.has(key) && this.genAI) {
+      this.modelCache.set(key, this.genAI.getGenerativeModel({ model: modelName, systemInstruction }));
+    }
+    return this.modelCache.get(key) || this.genAI!.getGenerativeModel({ model: modelName, systemInstruction });
+  }
+
+  private async callGeminiStream(
+    context: string,
+    mode: AssistantMode,
+    resume?: string,
+    jobDescription?: string,
+    onToken?: (token: string) => void
+  ): Promise<string> {
+    const systemInstruction = this.buildSystemInstruction(mode, resume, jobDescription);
+    const model = this.getCachedModel(this.modelName, systemInstruction);
+
+    const prompt = `Live Context:\n"${context}"\n\nProvide response:`;
+
+    const result = await model.generateContentStream({
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: {
-        maxOutputTokens: 300,
-        temperature: 0.7,
-      }
+        maxOutputTokens: 120,
+        temperature: 0.2,
+        topP: 0.8,
+        topK: 20,
+      },
     });
 
-    return result.response.text().trim();
-  }
+    const tokenParts: string[] = [];
+    for await (const chunk of result.stream) {
+      const text = chunk.text();
+      tokenParts.push(text);
+      if (onToken) onToken(text);
+    }
 
-  private mockResponses: Record<AssistantMode, string[]> = {
-    interview: [
-      '✅ Mention your experience with TypeScript generics and how you\'ve used them to improve type safety in large codebases.',
-      '💡 Talk about a specific project: describe the problem, your approach, and the measurable outcome.',
-      '🔑 Key point: Emphasize your ability to work with distributed teams and asynchronous communication.',
-      '📌 For system design: Start with requirements → high-level → components → data flow → trade-offs.',
-    ],
-    meeting: [
-      '📋 Key action items: Schedule follow-up, assign owners, set deadline.',
-      '💡 Suggestion: Table this discussion for async — document it in Confluence and reconnect next sprint.',
-      '🎯 Decision needed: The team needs to align on whether to proceed with option A or B by EOD.',
-    ],
-    coding: [
-      '💻 Use a HashMap for O(1) lookup instead of nested loops. Time complexity goes from O(n²) to O(n).',
-      '⚡ Consider using Promise.all() for parallel async operations instead of sequential awaits.',
-      '🔧 Binary search would solve this in O(log n) — the array is already sorted.',
-    ],
-    general: [
-      '💡 That\'s a complex topic — let me break it down into 3 key points for clarity.',
-      '🎯 The core question here seems to be about trade-offs between performance and maintainability.',
-      '✅ Based on context, the recommended approach would be to start with the simplest solution first.',
-    ],
-  };
-
-  private mockSuggestion(context: string, mode: AssistantMode): string {
-    const responses = this.mockResponses[mode];
-    const suggestion = responses[Math.floor(Math.random() * responses.length)];
-    logger.debug(`🤖 [MOCK LLM] → ${suggestion.substring(0, 60)}...`);
-    return suggestion;
+    return tokenParts.join('').trim();
   }
 }

@@ -26,10 +26,11 @@ const SCREEN_SHARE_WINDOW_TITLES = [
 ];
 
 export class SystemMonitor extends EventEmitter {
-  private pollInterval = 3000; // Check every 3 seconds
+  private pollInterval = 5000; // Check every 5 seconds
   private timer: ReturnType<typeof setInterval> | null = null;
   private wasSharing = false;
   private autoHideEnabled = false;
+  private isChecking = false;
 
   setAutoHide(enabled: boolean) {
     this.autoHideEnabled = enabled;
@@ -63,6 +64,9 @@ export class SystemMonitor extends EventEmitter {
       return;
     }
 
+    if (this.isChecking) return;
+    this.isChecking = true;
+
     if (process.platform === 'win32') {
       this.checkWindowsScreenShare();
     } else if (process.platform === 'darwin') {
@@ -75,10 +79,12 @@ export class SystemMonitor extends EventEmitter {
   private checkWindowsScreenShare() {
     // Check running processes for screen share apps
     exec('tasklist /fo csv /nh', (err, stdout) => {
+      this.isChecking = false;
       if (err) return;
 
+      const lower = stdout.toLowerCase();
       const isSharing = SCREEN_SHARE_APPS.some((app) =>
-        stdout.toLowerCase().includes(app.toLowerCase())
+        lower.includes(app.toLowerCase())
       );
 
       this.updateShareState(isSharing);
@@ -88,10 +94,12 @@ export class SystemMonitor extends EventEmitter {
   private checkMacScreenShare() {
     // On Mac, check for known screen share processes
     exec('ps aux', (err, stdout) => {
+      this.isChecking = false;
       if (err) return;
 
+      const lower = stdout.toLowerCase();
       const isSharing = SCREEN_SHARE_APPS.some((app) =>
-        stdout.toLowerCase().includes(app.toLowerCase())
+        lower.includes(app.toLowerCase())
       );
 
       this.updateShareState(isSharing);
@@ -100,10 +108,12 @@ export class SystemMonitor extends EventEmitter {
 
   private checkLinuxScreenShare() {
     exec('ps aux', (err, stdout) => {
+      this.isChecking = false;
       if (err) return;
 
+      const lower = stdout.toLowerCase();
       const isSharing = SCREEN_SHARE_APPS.some((app) =>
-        stdout.toLowerCase().includes(app.toLowerCase())
+        lower.includes(app.toLowerCase())
       );
 
       this.updateShareState(isSharing);

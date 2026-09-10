@@ -11,9 +11,14 @@ if (process.argv.includes('--headless')) {
     return;
 }
 
-const electronPath = path.resolve(__dirname, '../../node_modules/.pnpm/electron@41.0.3/node_modules/electron/dist/electron.exe');
+let electronPath;
+try {
+    electronPath = require('electron');
+} catch (e) {
+    electronPath = path.resolve(__dirname, '../../node_modules/.pnpm/electron@41.0.3/node_modules/electron/dist/electron.exe');
+}
 
-if (!fs.existsSync(electronPath)) {
+if (!electronPath || !fs.existsSync(electronPath)) {
     console.error('Electron binary not found at:', electronPath);
     process.exit(1);
 }

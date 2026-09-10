@@ -6,7 +6,7 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "ts-node src/index.ts",
-    "build": "tsc",
+    "build": "tsc && node -e \"const fs=require('fs'); if(fs.existsSync('public')) fs.cpSync('public', 'dist/public', {recursive: true});\"",
     "start": "node dist/index.js"
   },
   "dependencies": {

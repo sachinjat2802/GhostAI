@@ -24,12 +24,14 @@ async function bootstrap() {
   const systemMonitor = new SystemMonitor();
 
   // Initialize HTTP/WebSocket server
-  const server = new EngineServer(eventBus);
+  const server = new EngineServer(eventBus, contextService);
   await server.start();
 
   // Wire up the pipeline
   // STT → Context → LLM → Broadcast
-  eventBus.on('stt:transcript', async (text: string) => {
+  eventBus.on('stt:transcript', async (data: any) => {
+    const text = typeof data === 'string' ? data : (typeof data === 'object' && data?.text ? data.text : '');
+    if (!text) return;
     logger.debug(`📝 Transcript: ${text}`);
     contextService.addTranscript(text);
     eventBus.emit('ui:transcript', text);
@@ -37,28 +39,52 @@ async function bootstrap() {
 
   // LLM is triggered on debounce after new transcript
   let llmTimer: ReturnType<typeof setTimeout> | null = null;
-  const LLM_DEBOUNCE = parseInt(process.env.LLM_DEBOUNCE_MS || '500');
+  const LLM_DEBOUNCE = parseInt(process.env.LLM_DEBOUNCE_MS || '100');
 
-  eventBus.on('stt:transcript', () => {
-    if (llmTimer) clearTimeout(llmTimer);
-    llmTimer = setTimeout(async () => {
-      const context = contextService.getContext();
-      const mode = contextService.getMode();
-      if (!context.trim()) return;
+  const triggerLLM = async (force = false) => {
+    const context = contextService.getContext();
+    const mode = contextService.getMode();
+    if (!context.trim()) return;
 
-      logger.info('🧠 Calling LLM...');
-      try {
-        const resume = contextService.getResume();
-        const suggestion = await llmService.getSuggestion(context, mode, resume);
-        
-        if (suggestion) {
-          logger.info(`💡 Suggestion: ${suggestion}`);
-          eventBus.emit('ui:suggestion', suggestion);
-        }
-      } catch (err: any) {
-        logger.error('Gemini Call Error:', err);
+    logger.info('🧠 Calling LLM (Streaming)...');
+    try {
+      const resume = contextService.getResume();
+      const jobDescription = contextService.getJobDescription();
+      
+      let fullSuggestion = '';
+      const suggestion = await llmService.getSuggestion(
+        context,
+        mode,
+        resume,
+        jobDescription,
+        (token: string) => {
+          fullSuggestion += token;
+          eventBus.emit('ui:suggestion-chunk', token);
+        },
+        force
+      );
+      
+      eventBus.emit('ui:suggestion-end', null);
+      const finalAns = suggestion || fullSuggestion;
+      if (finalAns) {
+        logger.info(`💡 Suggestion ready: ${finalAns.substring(0, 60)}...`);
+        contextService.addSuggestion(finalAns);
+        eventBus.emit('ui:suggestion', finalAns);
       }
-    }, LLM_DEBOUNCE);
+    } catch (err: any) {
+      logger.error('LLM Call Error:', err);
+    }
+  };
+
+  eventBus.on('stt:transcript', (data: any) => {
+    const isForce = typeof data === 'object' && data?.force;
+    if (isForce) {
+      if (llmTimer) clearTimeout(llmTimer);
+      triggerLLM(true);
+      return;
+    }
+    if (llmTimer) clearTimeout(llmTimer);
+    llmTimer = setTimeout(() => triggerLLM(false), LLM_DEBOUNCE);
   });
 
   // Audio → STT (Backend Fallback Capture)
@@ -78,14 +104,22 @@ async function bootstrap() {
   });
 
   // Settings synchronization from client
-  eventBus.on('settings:sync', (settings: { apiKey?: string; resume?: string; autoHide?: boolean }) => {
+  eventBus.on('settings:sync', (settings: { provider?: any; geminiModel?: string; modelName?: string; apiKey?: string; resume?: string; jobDescription?: string; autoHide?: boolean }) => {
+    const selectedModel = settings.geminiModel || settings.modelName;
+    if (selectedModel) {
+      process.env.GEMINI_MODEL = selectedModel;
+      llmService.setModelName(selectedModel);
+    }
     if (settings.apiKey) {
       process.env.GEMINI_API_KEY = settings.apiKey;
       sttService.updateApiKey(settings.apiKey);
-      llmService.updateApiKey(settings.apiKey);
+      llmService.updateApiKey(settings.apiKey, selectedModel);
     }
     if (settings.resume !== undefined) {
       contextService.setResume(settings.resume);
+    }
+    if (settings.jobDescription !== undefined) {
+      contextService.setJobDescription(settings.jobDescription);
     }
     if (settings.autoHide !== undefined) {
       systemMonitor.setAutoHide(settings.autoHide);
@@ -94,6 +128,21 @@ async function bootstrap() {
 
   eventBus.on('command:set-auto-hide', (enabled: boolean) => {
     systemMonitor.setAutoHide(enabled);
+  });
+
+  // Session Export Handlers
+  eventBus.on('command:export-md', (res: any) => {
+    const md = contextService.exportMarkdown();
+    res.setHeader('Content-Type', 'text/markdown');
+    res.setHeader('Content-Disposition', 'attachment; filename="ghost-ai-session.md"');
+    res.send(md);
+  });
+
+  eventBus.on('command:export-json', (res: any) => {
+    const json = contextService.exportJSON();
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="ghost-ai-session.json"');
+    res.send(json);
   });
 
   // System monitor → overlay control
@@ -111,6 +160,7 @@ async function bootstrap() {
   eventBus.on('command:start-listening', () => {
     logger.info('🎤 Starting audio capture...');
     audioPipeline.start();
+    llmService.prewarm();
   });
 
   eventBus.on('command:stop-listening', () => {
@@ -135,19 +185,60 @@ async function bootstrap() {
     try {
       const mode = contextService.getMode();
       const suggestion = await llmService.analyzeImage(base64Data, mode);
-      if (suggestion) {
-        eventBus.emit('ui:suggestion', suggestion);
-      }
-    } catch (err) {
+      const outputMsg = suggestion || '⚠️ No response generated for screen capture.';
+      eventBus.emit('ui:suggestion', outputMsg);
+    } catch (err: any) {
       logger.error('Image analysis failed', err);
+      eventBus.emit('ui:suggestion', `⚠️ Image Analysis Error: ${err.message || 'Processing failed'}`);
     }
   });
 
   // Add backdoor to test specific questions
   eventBus.on('command:inject-transcript', (text: string) => {
     logger.info(`💉 INJECTING CUSTOM TRANSCRIPT: ${text}`);
-    // Trigger the regular pipeline
-    eventBus.emit('stt:transcript', text);
+    contextService.addTranscript(text);
+    eventBus.emit('ui:transcript', text);
+    eventBus.emit('stt:transcript', { text, force: true });
+  });
+
+  // AI Answer Refinement Action Chips (One-Tap Phone Tuning)
+  const ACTION_PROMPTS: Record<string, string> = {
+    shorter: 'Make the answer extremely concise (1 short sentence max).',
+    'deeper-code': 'Provide detailed code implementation with Time & Space complexity analysis.',
+    'bullet-points': 'Format the answer strictly as 3 clean bullet points.',
+    regenerate: 'Provide an alternative, highly persuasive approach to this answer.',
+  };
+
+  eventBus.on('command:ai-action', async (action: string) => {
+    logger.info(`✨ AI Action triggered: ${action}`);
+    const context = contextService.getContext();
+    const mode = contextService.getMode();
+    if (!context.trim()) return;
+
+    const modifierPrompt = ACTION_PROMPTS[action] || '';
+
+    try {
+      let fullSuggestion = '';
+      const suggestion = await llmService.getSuggestion(
+        context + (modifierPrompt ? '\n[Instruction: ' + modifierPrompt + ']' : ''),
+        mode,
+        contextService.getResume(),
+        contextService.getJobDescription(),
+        (token: string) => {
+          fullSuggestion += token;
+          eventBus.emit('ui:suggestion-chunk', token);
+        },
+        true
+      );
+      eventBus.emit('ui:suggestion-end', null);
+      const finalAns = suggestion || fullSuggestion;
+      if (finalAns) {
+        contextService.addSuggestion(finalAns);
+        eventBus.emit('ui:suggestion', finalAns);
+      }
+    } catch(err: any) {
+      logger.error('AI Action error:', err);
+    }
   });
 
   // Start system monitoring

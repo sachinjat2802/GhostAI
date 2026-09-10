@@ -1,11 +1,61 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, Tray, Menu, nativeImage, desktopCapturer } = require('electron');
 const path = require('path');
+const fs = require('fs');
+
+// Load environment variables cleanly
+try {
+  const dotenv = require('dotenv');
+  dotenv.config({ path: path.join(__dirname, '../../../.env') });
+  dotenv.config({ path: path.join(__dirname, '../../.env') });
+  dotenv.config({ path: path.join(process.cwd(), '.env') });
+  dotenv.config({ path: path.join(app.getAppPath(), '.env') });
+} catch (e) {}
+
+// Single Instance Lock (Prevents duplicate instances and EADDRINUSE port conflicts)
+const gotTheLock = app.requestSingleInstanceLock();
+if (!gotTheLock) {
+  console.log('⚠️ Ghost AI is already running. Quitting duplicate instance.');
+  app.quit();
+  process.exit(0);
+}
+
+process.on('uncaughtException', (err) => {
+  console.warn('Caught main process exception:', err ? err.message : err);
+});
 
 let mainWindow = null;
 let tray = null;
 let isListening = false;
 let isVisible = true;
 let currentMode = 'interview';
+
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
+function startEmbeddedEngine() {
+  try {
+    const bundledPath = path.join(__dirname, 'core-engine/index.js');
+    const devPath = path.join(__dirname, '../../core-engine/dist/index.js');
+    
+    let enginePath = null;
+    if (fs.existsSync(bundledPath)) enginePath = bundledPath;
+    else if (fs.existsSync(devPath)) enginePath = devPath;
+
+    if (enginePath) {
+      console.log('🚀 Launching Embedded Core Engine server from:', enginePath);
+      require(enginePath);
+    } else {
+      console.warn('⚠️ Bundled core engine not found at:', bundledPath);
+    }
+  } catch (err) {
+    console.error('❌ Failed to launch embedded core engine:', err);
+  }
+}
 
 function createOverlayWindow() {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
@@ -16,7 +66,9 @@ function createOverlayWindow() {
     x: width - 440,
     y: height - 560,
     transparent: true,
+    backgroundColor: '#00000000',
     frame: false,
+    thickFrame: false,
     alwaysOnTop: true,
     skipTaskbar: true,
     resizable: true,
@@ -24,6 +76,7 @@ function createOverlayWindow() {
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
+      backgroundThrottling: false,
       preload: path.join(__dirname, 'preload.js'),
     },
   });
@@ -58,6 +111,13 @@ function createTray() {
     {
       label: '👻 Ghost AI',
       enabled: false,
+    },
+    {
+      label: '📱 Mobile Spy Mode (/spy)',
+      click: () => {
+        const { shell } = require('electron');
+        shell.openExternal('http://localhost:3001/spy');
+      },
     },
     { type: 'separator' },
     {
@@ -186,13 +246,41 @@ function registerShortcuts() {
   globalShortcut.register('Ctrl+Shift+T', () => {
     if (mainWindow) mainWindow.webContents.send('command', 'toggle-text-only');
   });
+
+  // Ctrl+Shift+K → Toggle Click-Through mode (Mouse pass-through)
+  globalShortcut.register('Ctrl+Shift+K', () => {
+    if (mainWindow) mainWindow.webContents.send('command', 'toggle-click-through');
+  });
+
+  // Ctrl+Shift+S → Screen Capture & Solve (OCR)
+  globalShortcut.register('Ctrl+Shift+S', () => {
+    if (mainWindow) mainWindow.webContents.send('command', 'capture-screen-trigger');
+  });
 }
 
 // IPC handlers (messages from renderer)
+ipcMain.on('open-external', (_, url) => {
+  if (url) {
+    const { shell } = require('electron');
+    shell.openExternal(url);
+  }
+});
 ipcMain.on('toggle-visibility', () => toggleVisibility());
 ipcMain.on('set-mode', (_, mode) => setMode(mode));
 ipcMain.on('resize-window', (_, { width, height }) => {
   if (mainWindow) mainWindow.setSize(width, height);
+});
+
+ipcMain.on('window-drag-move', (_, { deltaX, deltaY }) => {
+  if (!mainWindow) return;
+  const [x, y] = mainWindow.getPosition();
+  mainWindow.setPosition(x + deltaX, y + deltaY);
+});
+
+ipcMain.on('set-click-through', (_, flag) => {
+  if (mainWindow) {
+    mainWindow.setIgnoreMouseEvents(flag, { forward: true });
+  }
 });
 
 ipcMain.on('hide-window', () => {
@@ -223,31 +311,40 @@ ipcMain.handle('get-desktop-sources', async () => {
 ipcMain.on('capture-screen', async (event) => {
   if (!mainWindow) return;
   const [oldX, oldY] = mainWindow.getPosition();
-  mainWindow.setPosition(-5000, -5000); // Move off-screen instead of hiding
+  
+  // Temporarily disable content protection & hide window off-screen to capture clean screenshot
+  mainWindow.setContentProtection(false);
+  mainWindow.setPosition(-5000, -5000);
 
   setTimeout(async () => {
     try {
-      const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+      const primaryDisplay = screen.getPrimaryDisplay();
+      const { width, height } = primaryDisplay.size;
       const sources = await desktopCapturer.getSources({
         types: ['screen'],
-        thumbnailSize: { width, height }
+        thumbnailSize: { width: Math.min(1920, width), height: Math.min(1080, height) }
       });
 
       if (sources && sources.length > 0) {
-        event.reply('screen-captured', sources[0].thumbnail.toDataURL());
+        const dataUrl = sources[0].thumbnail.toDataURL();
+        event.reply('screen-captured', dataUrl);
+      } else {
+        event.reply('screen-capture-failed', 'No display sources found for screenshot');
       }
     } catch (e) {
-      console.error('Capture failed:', e);
+      console.error('Screen capture failed:', e);
+      event.reply('screen-capture-failed', e.message || 'Capture exception');
     } finally {
       if (mainWindow) {
-        mainWindow.setPosition(oldX, oldY); // Move back
+        mainWindow.setPosition(oldX, oldY);
         mainWindow.setContentProtection(true);
       }
     }
-  }, 200);
+  }, 150);
 });
 
 app.whenReady().then(() => {
+  startEmbeddedEngine();
   const isHeadless = process.argv.includes('--headless');
   if (!isHeadless) {
     createOverlayWindow();

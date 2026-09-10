@@ -7,73 +7,91 @@ import { Logger } from '../utils/Logger';
 
 const logger = new Logger('STTService');
 
-export type STTProvider = 'openai' | 'gemini' | 'mock';
+export type STTProvider = 'gemini' | 'openai' | 'local-whisper';
 
 export class STTService {
-  private provider: STTProvider;
+  private provider: STTProvider = 'gemini';
   private openai: OpenAI | null = null;
   private genAI: GoogleGenerativeAI | null = null;
   private geminiModel: any = null;
   private sampleRate = parseInt(process.env.AUDIO_SAMPLE_RATE || '16000');
+  private localWhisperUrl = process.env.LOCAL_WHISPER_URL || 'http://localhost:8000/transcribe';
 
   constructor() {
-    this.provider = (process.env.STT_PROVIDER as STTProvider) || 'openai';
+    const configuredProvider = (process.env.STT_PROVIDER as STTProvider) || 'gemini';
+    const key = process.env.GEMINI_API_KEY || '';
+    const modelName = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
 
-    if (this.provider === 'openai') {
-      if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'your_openai_api_key_here') {
-        logger.warn('⚠️ OPENAI_API_KEY not set — falling back to Gemini/Mock');
-        this.provider = process.env.GEMINI_API_KEY ? 'gemini' : 'mock';
-      } else {
-        this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-        logger.info('🎤 STT: OpenAI Whisper mode');
-      }
-    }
-
-    if (this.provider === 'gemini') {
-      if (!process.env.GEMINI_API_KEY || process.env.GEMINI_API_KEY === 'your_gemini_api_key_here') {
-        logger.warn('⚠️ GEMINI_API_KEY not set — falling back to mock STT');
-        this.provider = 'mock';
-      } else {
-        this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-        this.geminiModel = this.genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-        logger.info('🎤 STT: Gemini Flash mode');
-      }
-    }
-
-    if (this.provider === 'mock') {
-      logger.warn('🎤 STT: MOCK mode — will return fake transcripts');
+    if (configuredProvider === 'local-whisper') {
+      this.provider = 'local-whisper';
+      logger.info(`🎤 STT: Local Faster-Whisper Python server (${this.localWhisperUrl})`);
+    } else if (key) {
+      this.provider = 'gemini';
+      this.genAI = new GoogleGenerativeAI(key);
+      this.geminiModel = this.genAI.getGenerativeModel({ model: modelName });
+      logger.info(`🎤 STT: Real Gemini Flash mode (${modelName}) initialized`);
+    } else if (process.env.OPENAI_API_KEY) {
+      this.provider = 'openai';
+      this.openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+      logger.info('🎤 STT: Real OpenAI Whisper mode initialized');
+    } else {
+      logger.warn('⚠️ No API Key set for STT — please set GEMINI_API_KEY in .env or Settings');
     }
   }
 
-  updateApiKey(key: string) {
-    if (!key) return;
-    if (this.provider === 'mock') {
-      this.provider = 'gemini'; // default upgrade path
+  updateApiKey(key: string, provider: STTProvider = 'gemini') {
+    this.provider = provider;
+    if (this.provider === 'local-whisper') {
+      logger.info(`🎤 STT: Local Faster-Whisper Python server activated (${this.localWhisperUrl})`);
+      return;
     }
+    if (!key) return;
+    
     if (this.provider === 'gemini') {
+      const modelName = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
       this.genAI = new GoogleGenerativeAI(key);
-      this.geminiModel = this.genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
-      logger.info('🎤 STT: Gemini Flash mode activated via updated key');
+      this.geminiModel = this.genAI.getGenerativeModel({ model: modelName });
+      logger.info(`🎤 STT: Gemini Flash mode activated (${modelName})`);
     } else if (this.provider === 'openai') {
       this.openai = new OpenAI({ apiKey: key });
-      logger.info('🎤 STT: OpenAI Whisper mode activated via updated key');
+      logger.info('🎤 STT: OpenAI Whisper mode activated');
     }
   }
 
   async transcribe(audioChunk: Buffer): Promise<string | null> {
-    if (this.provider === 'mock') {
-      return this.mockTranscribe();
-    }
-
     try {
-      if (this.provider === 'openai') {
-        return await this.transcribeWithOpenAI(audioChunk);
-      } else if (this.provider === 'gemini') {
+      if (this.provider === 'local-whisper') {
+        return await this.transcribeWithLocalWhisper(audioChunk);
+      } else if (this.provider === 'gemini' && this.genAI) {
         return await this.transcribeWithGemini(audioChunk);
+      } else if (this.provider === 'openai' && this.openai) {
+        return await this.transcribeWithOpenAI(audioChunk);
       }
       return null;
     } catch (err: any) {
-      logger.error(`STT error: ${err.message}`);
+      logger.error(`STT Error [${this.provider}]: ${err.message}`);
+      return null;
+    }
+  }
+
+  private async transcribeWithLocalWhisper(audioChunk: Buffer): Promise<string | null> {
+    if (audioChunk.length < 1000) return null;
+    try {
+      const wavBuffer = this.pcmToWav(audioChunk);
+      const blob = new Blob([wavBuffer], { type: 'audio/wav' });
+      const formData = new FormData();
+      formData.append('file', blob, 'audio.wav');
+
+      const response = await fetch(this.localWhisperUrl, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) return null;
+      const data: any = await response.json();
+      return data.text ? data.text.trim() : null;
+    } catch (err: any) {
+      logger.error(`Local Faster-Whisper Error: ${err.message}`);
       return null;
     }
   }
@@ -97,30 +115,41 @@ export class STTService {
   }
 
   private async transcribeWithGemini(audioChunk: Buffer): Promise<string | null> {
-    // Gemini handles audio well, but we should avoid sending tiny chunks
-    if (audioChunk.length < 8000) return null; // approx 0.25s of 16kHz audio
+    if (audioChunk.length < 1600) return null; // minimum 0.05s of audio
 
     try {
       const wavBuffer = this.pcmToWav(audioChunk);
+      const modelName = process.env.GEMINI_MODEL || 'gemini-3.5-flash-lite';
       if (!this.geminiModel && this.genAI) {
-        this.geminiModel = this.genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+        this.geminiModel = this.genAI.getGenerativeModel({ model: modelName });
       }
       const model = this.geminiModel;
 
-      const result = await model.generateContent([
-        {
-          inlineData: {
-            mimeType: 'audio/wav',
-            data: wavBuffer.toString('base64')
-          }
+      const result = await model.generateContent({
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                inlineData: {
+                  mimeType: 'audio/wav',
+                  data: wavBuffer.toString('base64'),
+                },
+              },
+              { text: 'Transcribe the audio accurately. If there is no speech, return an empty string. Only return the transcription, no extra text.' },
+            ],
+          },
+        ],
+        generationConfig: {
+          temperature: 0.0,
+          maxOutputTokens: 60,
         },
-        { text: "Transcribe the audio accurately. If there is no speech, return an empty string. Only return the transcription, no extra text." }
-      ]);
+      });
 
       const text = result.response.text().trim();
       return text || null;
     } catch (err: any) {
-      logger.error(`Gemini STT error: ${err.message}`);
+      logger.error(`Gemini STT Error: ${err.message}`);
       return null;
     }
   }
@@ -133,7 +162,7 @@ export class STTService {
     const blockAlign = (numChannels * bitsPerSample) / 8;
     const dataSize = pcmBuffer.length;
     const headerSize = 44;
-    const wavBuffer = Buffer.alloc(headerSize + dataSize);
+    const wavBuffer = Buffer.allocUnsafe(headerSize + dataSize);
 
     wavBuffer.write('RIFF', 0);
     wavBuffer.writeUInt32LE(36 + dataSize, 4);
@@ -151,24 +180,5 @@ export class STTService {
     pcmBuffer.copy(wavBuffer, headerSize);
 
     return wavBuffer;
-  }
-
-  private mockTranscribeCount = 0;
-  private mockPhrases = [
-    'Tell me about your experience with TypeScript',
-    'How would you design a scalable microservices architecture',
-    'What is your approach to handling technical debt',
-    'Can you explain the difference between REST and GraphQL',
-    'How do you handle state management in large applications',
-    'What are your thoughts on test-driven development',
-    'Describe a challenging project you worked on recently',
-  ];
-
-  private mockTranscribe(): string | null {
-    this.mockTranscribeCount++;
-    if (this.mockTranscribeCount % 5 !== 0) return null;
-    const phrase = this.mockPhrases[Math.floor(Math.random() * this.mockPhrases.length)];
-    logger.debug(`🤖 [MOCK STT] → "${phrase}"`);
-    return phrase;
   }
 }
