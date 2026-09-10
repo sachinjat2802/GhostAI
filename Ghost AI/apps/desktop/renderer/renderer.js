@@ -596,6 +596,33 @@ function sendSpeechBuffer() {
   speechDuration = 0;
 }
 
+function downsampleTo16k(inputData, inputSampleRate) {
+  if (inputSampleRate === 16000) {
+    const pcm = new Int16Array(inputData.length);
+    for (let i = 0; i < inputData.length; i++) {
+      const s = inputData[i] < -1 ? -1 : inputData[i] > 1 ? 1 : inputData[i];
+      pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return pcm;
+  }
+
+  const ratio = inputSampleRate / 16000;
+  const newLength = Math.floor(inputData.length / ratio);
+  const result = new Int16Array(newLength);
+
+  for (let i = 0; i < newLength; i++) {
+    const originPos = i * ratio;
+    const i0 = Math.floor(originPos);
+    const i1 = Math.min(i0 + 1, inputData.length - 1);
+    const frac = originPos - i0;
+    const interpolated = inputData[i0] * (1 - frac) + inputData[i1] * frac;
+    const clamped = interpolated < -1 ? -1 : interpolated > 1 ? 1 : interpolated;
+    result[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+  }
+
+  return result;
+}
+
 // ============ AUDIO PIPELINE ============
 async function startFrontendAudio() {
   const sourceVal = document.getElementById('setting-audio-source').value;
@@ -633,32 +660,40 @@ async function startFrontendAudio() {
     }
 
     mediaStream = stream;
-    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    try {
+      audioContext = new AudioCtx({ sampleRate: 16000 });
+    } catch (e) {
+      console.warn('16kHz native AudioContext unsupported, using default hardware sample rate:', e);
+      audioContext = new AudioCtx();
+    }
+
     audioSourceNode = audioContext.createMediaStreamSource(stream);
     scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
     
     audioSourceNode.connect(scriptProcessor);
     scriptProcessor.connect(audioContext.destination);
 
+    const nativeRate = audioContext.sampleRate;
+
     scriptProcessor.onaudioprocess = (e) => {
       if (!isListening) return;
       const inputData = e.inputBuffer.getChannelData(0);
       const len = inputData.length;
-      const pcmChunk = new Int16Array(len);
       let sum = 0;
 
-      // Combined single-pass iteration (50% CPU reduction for audio framing)
       for (let i = 0; i < len; i++) {
         const sample = inputData[i];
         sum += sample * sample;
-        const clamped = sample < -1 ? -1 : sample > 1 ? 1 : sample;
-        pcmChunk[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
       }
       
       const rms = Math.sqrt(sum / len);
       
       // Drive the visualizer
       updateAudioVisualizer(rms);
+
+      // Downsample input audio Float32Array to 16,000Hz mono Int16Array PCM
+      const pcmChunk = downsampleTo16k(inputData, nativeRate);
       
       // VAD logic
       if (rms > vadThreshold) {
@@ -668,7 +703,7 @@ async function startFrontendAudio() {
           silenceTimer = null;
         }
         speechBuffer.push(pcmChunk);
-        speechDuration += (inputData.length / 16000) * 1000;
+        speechDuration += (pcmChunk.length / 16000) * 1000;
         
         if (speechDuration >= MAX_SPEECH_DURATION_MS) {
           sendSpeechBuffer();

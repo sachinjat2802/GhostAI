@@ -8,6 +8,33 @@ import { ChatBar } from './components/ChatBar';
 import { ControlBar } from './components/ControlBar';
 import { SettingsModal } from './components/SettingsModal';
 
+function downsampleDirect(inputData: Float32Array): Int16Array {
+  const pcm = new Int16Array(inputData.length);
+  for (let i = 0; i < inputData.length; i++) {
+    const s = inputData[i] < -1 ? -1 : inputData[i] > 1 ? 1 : inputData[i];
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return pcm;
+}
+
+function downsampleInterpolate(inputData: Float32Array, inputSampleRate: number): Int16Array {
+  const ratio = inputSampleRate / 16000;
+  const newLength = Math.floor(inputData.length / ratio);
+  const result = new Int16Array(newLength);
+
+  for (let i = 0; i < newLength; i++) {
+    const originPos = i * ratio;
+    const i0 = Math.floor(originPos);
+    const i1 = Math.min(i0 + 1, inputData.length - 1);
+    const frac = originPos - i0;
+    const interpolated = inputData[i0] * (1 - frac) + inputData[i1] * frac;
+    const clamped = interpolated < -1 ? -1 : interpolated > 1 ? 1 : interpolated;
+    result[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7FFF;
+  }
+
+  return result;
+}
+
 export function App() {
   const [mode, setMode] = useState('interview');
   const [isListening, setIsListening] = useState(false);
@@ -83,7 +110,12 @@ export function App() {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      const audioCtx = new AudioCtx({ sampleRate: 16000 });
+      let audioCtx: AudioContext;
+      try {
+        audioCtx = new AudioCtx({ sampleRate: 16000 });
+      } catch (e) {
+        audioCtx = new AudioCtx();
+      }
       audioContextRef.current = audioCtx;
 
       if (audioCtx.state === 'suspended') {
@@ -91,35 +123,6 @@ export function App() {
       }
 
       const source = audioCtx.createMediaStreamSource(stream);
-
-      // Try AudioWorklet first for 0-lag background audio processing
-      if (audioCtx.audioWorklet) {
-        try {
-          await audioCtx.audioWorklet.addModule('/audio-processor.js');
-          const workletNode = new AudioWorkletNode(audioCtx, 'ghost-audio-processor');
-          (scriptProcessorRef as any).current = workletNode;
-
-          workletNode.port.onmessage = (event) => {
-            if (event.data.type === 'AUDIO_CHUNK' && event.data.buffer) {
-              if (socketRef.current && socketRef.current.connected) {
-                socketRef.current.emit('audio-chunk', event.data.buffer);
-              } else {
-                fetch('/api/audio-chunk', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/octet-stream' },
-                  body: event.data.buffer,
-                }).catch(() => {});
-              }
-            }
-          };
-
-          source.connect(workletNode);
-          workletNode.connect(audioCtx.destination);
-          return;
-        } catch (workletErr) {
-          console.log('Fallback to ScriptProcessor:', workletErr);
-        }
-      }
 
       // Legacy Fallback Processor
       const processor = audioCtx.createScriptProcessor(4096, 1, 1);
@@ -131,19 +134,16 @@ export function App() {
       let speechBuf: Int16Array[] = [];
       let silTimer: any = null;
       const vadSens = parseFloat(localStorage.getItem('vad_sensitivity') || '0.015');
+      const nativeRate = audioCtx.sampleRate;
 
       processor.onaudioprocess = (e) => {
         const input = e.inputBuffer.getChannelData(0);
-        const pcm = new Int16Array(input.length);
         let sum = 0;
-
         for (let i = 0; i < input.length; i++) {
-          const s = input[i];
-          sum += s * s;
-          const clamped = s < -1 ? -1 : s > 1 ? 1 : s;
-          pcm[i] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+          sum += input[i] * input[i];
         }
 
+        const pcm = nativeRate === 16000 ? downsampleDirect(input) : downsampleInterpolate(input, nativeRate);
         const rms = Math.sqrt(sum / input.length);
         if (rms > vadSens) {
           speechBuf.push(pcm);
