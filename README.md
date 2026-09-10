@@ -1,22 +1,30 @@
 # 👻 Ghost AI — Real-Time Invisible Teleprompter & AI Assistant
 
+[![Direct Download Windows Installer](https://img.shields.io/badge/Download-Ghost_AI_v1.0.0_.exe-success?style=for-the-badge&logo=windows)](https://github.com/sachinjat2802/GhostAI/releases/download/v1.0.0/Ghost.AI.1.0.0.exe)
+[![GitHub Release](https://img.shields.io/github/v/release/sachinjat2802/GhostAI?style=for-the-badge)](https://github.com/sachinjat2802/GhostAI/releases/tag/v1.0.0)
 [![License: MIT](https://img.shields.io/badge/License-MIT-purple.svg)](https://opensource.org/licenses/MIT)
-[![Version: 1.0.0](https://img.shields.io/badge/Version-1.0.0-blue.svg)](package.json)
-[![Platform: Windows | Mobile](https://img.shields.io/badge/Platform-Windows%20%7C%20Mobile-green.svg)](#-mobile-spy-mode-spy)
-[![Build Status](https://img.shields.io/badge/Build-Passing-success.svg)](#-building-the-windows-installer-exe)
 
 > **Ghost AI** is an ultra-low latency, real-time invisible AI assistant and teleprompter built for live job interviews, technical pair programming, high-stakes meetings, and automated OCR problem solving.
 
 ---
 
+## 📥 Direct Download & Release
+
+Download the official pre-compiled standalone Windows Desktop Installer (`.exe`):
+
+- ⚡ **[Download Ghost AI v1.0.0 (.exe)](https://github.com/sachinjat2802/GhostAI/releases/download/v1.0.0/Ghost.AI.1.0.0.exe)** *(Windows 10/11 x64 Standalone Installer)*
+- 📦 **[View GitHub Release v1.0.0 Page](https://github.com/sachinjat2802/GhostAI/releases/tag/v1.0.0)**
+
+---
+
 ## 📚 Complete Technical Documentation
 
-- 📐 **[High Level Design (HLD)](file:///d:/Ghost%20AI/Ghost%20AI/docs/HLD.md)** — Core architecture, system topology, microservices, and sequence diagrams.
-- 🔬 **[Low Level Design (LLD)](file:///d:/Ghost%20AI/Ghost%20AI/docs/LLD.md)** — Class specifications, memory heap budgets, and circular ring buffer mechanics.
-- ⚡ **[System Architecture](file:///d:/Ghost%20AI/Ghost%20AI/docs/ARCHITECTURE.md)** — EventBus pub/sub, monorepo breakdown, anti-detection matrix, and process masking.
-- 📡 **[API & Protocol Spec](file:///d:/Ghost%20AI/Ghost%20AI/docs/API_AND_PROTOCOLS.md)** — Socket.IO real-time events, REST endpoints, and binary PCM frame protocols.
-- 🚀 **[Performance & 200 Optimizations](file:///d:/Ghost%20AI/Ghost%20AI/docs/PERFORMANCE_AND_OPTIMIZATIONS.md)** — Comprehensive guide on time/space complexity refactorings, AudioWorklets, and GPU visualizers.
-- 💡 **[100 Future Innovations](file:///d:/Ghost%20AI/Ghost%20AI/docs/100_FUTURE_OPTIMIZATIONS.md)** — Comprehensive roadmap of 100 next-level optimizations and futuristic features.
+- 📐 **[High Level Design (HLD)](docs/HLD.md)** — Core architecture, system topology, microservices, and sequence diagrams.
+- 🔬 **[Low Level Design (LLD)](docs/LLD.md)** — Class specifications, memory heap budgets, and circular ring buffer mechanics.
+- ⚡ **[System Architecture](docs/ARCHITECTURE.md)** — EventBus pub/sub, monorepo breakdown, anti-detection matrix, and process masking.
+- 📡 **[API & Protocol Spec](docs/API_AND_PROTOCOLS.md)** — Socket.IO real-time events, REST endpoints, and binary PCM frame protocols.
+- 🚀 **[Performance & 200 Optimizations](docs/PERFORMANCE_AND_OPTIMIZATIONS.md)** — Comprehensive guide on time/space complexity refactorings, AudioWorklets, and GPU visualizers.
+- 💡 **[100 Future Innovations](docs/100_FUTURE_OPTIMIZATIONS.md)** — Comprehensive roadmap of 100 next-level optimizations and futuristic features.
 
 ---
 
