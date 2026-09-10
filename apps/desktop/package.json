@@ -1,0 +1,54 @@
+{
+  "name": "ghost-ai-desktop",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ghost AI Desktop App - Electron overlay",
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "node run-electron.js",
+    "build": "node scripts/copy-core-engine.js && electron-builder --win",
+    "build:portable": "node scripts/copy-core-engine.js && electron-builder --win portable",
+    "build:nsis": "node scripts/copy-core-engine.js && electron-builder --win nsis",
+    "start": "node run-electron.js"
+  },
+  "build": {
+    "appId": "com.ghostai.desktop",
+    "productName": "Ghost AI",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "renderer/**/*",
+      "assets/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "executableName": "GhostAI"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Ghost AI"
+    }
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "axios": "^1.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "openai": "^4.77.3",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "electron": "^41.0.3",
+    "electron-builder": "^25.1.8"
+  }
+}
